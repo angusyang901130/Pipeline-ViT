@@ -1,0 +1,8 @@
+## pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
+accelerate==0.23.0
+transformers==4.34.0
+torchvision==0.15.2 
+torchaudio==2.0.2
+torch==2.0.1
+numpy==1.24.0
+tqdm==4.66.1
