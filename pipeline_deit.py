@@ -25,12 +25,14 @@ import logging
 
 def run_serial(model, input_data, batch_size=1, num_iter=100):
 
-    for i in tqdm(range(num_iter)):
+    # for i in tqdm(range(num_iter)):
+    for i in range(num_iter):
         output = model(input_data)
 
 def run_pipeline(driver, input_data, num_iter=10):
 
-    for i in tqdm(range(num_iter)):
+    # for i in tqdm(range(num_iter)):
+    for i in range(num_iter):
         output = driver(input_data)
 
 
@@ -41,7 +43,7 @@ if __name__ == "__main__":
     # MODEL_NAME = "facebook/deit-tiny-distilled-patch16-224"
     # MODEL_NAME = "facebook/deit-tiny-patch16-224"
 
-    WARMUP = 3
+    WARMUP = 1
     NUM_TEST = 10
     MINI_BATCH_SIZE = 1
     NUM_CHUNKS = 10
@@ -142,37 +144,47 @@ if __name__ == "__main__":
         print(" Calculating Latency ".center(80, "*"))
 
         num_img = 100
-        
+        fps_list = []
+
+        print("Running Serial...")
         with torch.no_grad():
-            # for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
+            for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
                 
                 start_time = time.perf_counter()
                 run_serial(model=model, input_data=serial_input)
                 end_time = time.perf_counter()
                 
-                # if i <= WARMUP:
-                #     continue
+                if i <= WARMUP:
+                    continue
 
                 fps = num_img / (end_time-start_time)
+                fps_list.append(fps)
                 # latency_per_img = (end_time-start_time) / num_img
 
 
         # print('Latency per image without pipeline (input batch size = %d): %.2f ms'%(serial_input.shape[0], (end_time-start_time)*1000))
-        print('Throughput without pipeline (input batch size = %d): %.4f fps'%(serial_input.shape[0], fps), end='\n\n')
+        print('Throughput without pipeline (input batch size = %d): %.4f fps'%(serial_input.shape[0], np.mean(fps_list)), end='\n\n')
 
         time.sleep(10)
+        fps_list = []
         
+        print("Running Pipeline...")
         with torch.no_grad():
+            
+            for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
+                start_time = time.perf_counter()
+                run_pipeline(driver=driver, input_data=pipeline_input)
+                end_time = time.perf_counter()
 
-            start_time = time.perf_counter()
-            run_pipeline(driver=driver, input_data=pipeline_input)
-            end_time = time.perf_counter()
+                if i <= WARMUP:
+                    continue
 
-            fps = num_img / (end_time-start_time)
-            # latency_per_img = (end_time-start_time) / num_img
+                fps = num_img / (end_time-start_time)
+                fps_list.append(fps)
+                # latency_per_img = (end_time-start_time) / num_img
 
         # print('Latency per image with %d pipeline stages (mini batch size = %d): %.2f ms'%(world_size, MINI_BATCH_SIZE, latency_per_img*1000))
-        print('Throughput with %d pipeline stages (mini batch size = %d): %.4f fps'%(world_size, MINI_BATCH_SIZE, fps), end='\n\n')
+        print('Throughput with %d pipeline stages (mini batch size = %d): %.4f fps'%(world_size, MINI_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
         
 
 
