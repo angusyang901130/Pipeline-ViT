@@ -175,12 +175,11 @@ def main():
                 reference_output = run_serial(model=model, imgs=tmp_imgs)
                 end_time = time.perf_counter()
                 
-        #         if i <= WARMUP:
-        #             continue
+                if i <= WARMUP:
+                    continue
 
                 fps = NUM_IMGS / (end_time-start_time)
                 fps_list.append(fps)
-                # latency_per_img = (end_time-start_time) / NUM_IMGS
 
 
         print('Throughput without pipeline (input batch size = %d): %.4f fps'%(SERIAL_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
@@ -214,7 +213,7 @@ def main():
             if rank == world_size - 1:
                 fps = NUM_IMGS / (end_time-start_time)
                 fps_list.append(fps)
-            # latency_per_img = (end_time-start_time) / NUM_IMGS
+
 
     if rank == world_size - 1:
         print('Throughput with %d pipeline stages (mini batch size = %d): %.4f fps'%(world_size, MINI_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
