@@ -26,7 +26,7 @@ def run_serial(model, imgs):
 
     # for i in tqdm(range(num_iter)):
     for img in imgs:
-
+        
         if result == None:
             output = model(img)
             result = output.logits
@@ -61,12 +61,12 @@ def main():
 
     DEVICE = "cpu"
 
-    WARMUP = 0
-    NUM_TEST = 1
-    NUM_IMGS = 100
+    WARMUP = 1
+    NUM_TEST = 5
+    NUM_IMGS = 200
 
     MINI_BATCH_SIZE = 1
-    NUM_CHUNKS = 100
+    NUM_CHUNKS = 200
 
     SERIAL_BATCH_SIZE = MINI_BATCH_SIZE
     PIPELINE_BATCH_SIZE = NUM_CHUNKS * MINI_BATCH_SIZE
@@ -85,6 +85,7 @@ def main():
     world_size = int(os.environ["WORLD_SIZE"])
     os.environ["TP_SOCKET_IFNAME"]="eth0" 
     os.environ["GLOO_SOCKET_IFNAME"]="eth0"
+    os.environ["GLOO_TIMEOUT_SECONDS"] = "3600"
 
     import torch.distributed as dist
 
@@ -170,10 +171,12 @@ def main():
 
 
         print('Throughput without pipeline (input batch size = %d): %.4f fps'%(SERIAL_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
+        time.sleep(10)
 
-
+    '''
+    Wait for serial to be done
+    '''
     dist.barrier()
-    time.sleep(10)
 
     '''
     Running Pipeline
@@ -185,14 +188,20 @@ def main():
     with torch.no_grad():
 
         for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
+            
+            '''
+            To be fair, all threads has to be on same point
+            '''
+
+            dist.barrier()
 
             start_time = time.perf_counter()
             pipeline_output = run_pipeline(stage=stage, imgs=imgs, rank=rank, world_size=world_size)
             end_time = time.perf_counter()
 
-            if rank == 0 or rank == world_size-1:
-                print(f"Rank {rank} Start Time: {start_time}")
-                print(f"Rank {rank} End Time: {end_time}")
+            # if rank == 0 or rank == world_size-1:
+            #     print(f"Rank {rank} Start Time: {start_time}")
+            #     print(f"Rank {rank} End Time: {end_time}")
 
             if i <= WARMUP:
                 continue
