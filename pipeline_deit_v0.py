@@ -23,7 +23,7 @@ import logging
 # parallel-scp -r -A -h ~/hosts.txt ~/Pipeline-ViT/ ~/
 # torchrun   --nnodes=2   --nproc-per-node=1   --node-rank=0   --master-addr=192.168.1.102   --master-port=50000   pipeline_deit.py
 
-def run_serial(model, input_data, num_iter=100):
+def run_serial(model, input_data, batch_size=1, num_iter=100):
 
     # for i in tqdm(range(num_iter)):
     for i in range(num_iter):
@@ -42,11 +42,12 @@ if __name__ == "__main__":
     # MODEL_NAME = "facebook/deit-small-patch16-224"
     # MODEL_NAME = "facebook/deit-tiny-distilled-patch16-224"
     # MODEL_NAME = "facebook/deit-tiny-patch16-224"
-    num_img = 100
+    # num_img = 100
+    # num_img_sr = 100
     WARMUP = 1
-    NUM_TEST = 10
-    MINI_BATCH_SIZE = 1
-    NUM_CHUNKS = 100
+    NUM_TEST = 5
+    MINI_BATCH_SIZE = 64
+    NUM_CHUNKS = 1
     NUM_INPUT = NUM_CHUNKS * MINI_BATCH_SIZE
     # INPUT_PER_ITER = 4
 
@@ -88,8 +89,8 @@ if __name__ == "__main__":
     kwargs_chunk_spec: Any = {}
     output_chunk_spec: Any = TensorChunkSpec(0)
 
-    # split_policy = pippy.split_into_equal_size(world_size)
-    annotate_split_points(model, {'deit.encoder.layer.5': PipeSplitWrapper.SplitPoint.END})
+    split_policy = pippy.split_into_equal_size(world_size)
+    # annotate_split_points(model, {'deit.encoder.layer.5': PipeSplitWrapper.SplitPoint.END})
 
     # url = 'http://images.cocodataset.org/val2017/000000039769.jpg'
     # image = Image.open(requests.get(url, stream=True).raw)
@@ -97,7 +98,7 @@ if __name__ == "__main__":
     # input = feature_extractor(images=image, return_tensors="pt")
     # image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
     # inputs = image_processor(images=image, return_tensors="pt").pixel_values
-    serial_input = torch.randn(1, 3, 224, 224)
+    # serial_input = torch.randn(num_img_sr, 3, 224, 224)
     pipeline_input = torch.randn(NUM_INPUT, 3, 224, 224)
 
     # print(inputs)
@@ -120,8 +121,7 @@ if __name__ == "__main__":
         model,
         num_ranks=world_size,
         num_chunks=NUM_CHUNKS,
-        # split_policy=split_policy,
-        schedule="FillDrain",
+        split_policy=split_policy,
         tracer=PiPPyHFTracer(),
         concrete_args=concrete_args,
         index_filename=None,
@@ -144,20 +144,21 @@ if __name__ == "__main__":
         # print(model)
         print(" Calculating Latency ".center(80, "*"))
 
+        
         fps_list = []
-        model_compiled = torch.compile(model)
-        # print("Running Serial...")
+
+        print("Running Serial...")
         # with torch.no_grad():
         #     for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
                 
         #         start_time = time.perf_counter()
-        #         run_serial(model=model_compiled, input_data=serial_input, num_iter=num_img)
+        #         run_serial(model=model, input_data=serial_input, num_iter=1)
         #         end_time = time.perf_counter()
                 
         #         if i <= WARMUP:
         #             continue
 
-        #         fps = num_img / (end_time-start_time)
+        #         fps = num_img_sr / (end_time-start_time)
         #         fps_list.append(fps)
         #         # latency_per_img = (end_time-start_time) / num_img
 
@@ -169,18 +170,17 @@ if __name__ == "__main__":
         fps_list = []
         
         print("Running Pipeline...")
-        driver.eval()
         with torch.no_grad():
             
             for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
                 start_time = time.perf_counter()
-                run_pipeline(driver=driver, input_data=pipeline_input, num_iter=num_img//NUM_CHUNKS)
+                run_pipeline(driver=driver, input_data=pipeline_input, num_iter=1)
                 end_time = time.perf_counter()
 
                 if i <= WARMUP:
                     continue
 
-                fps = num_img / (end_time-start_time)
+                fps = NUM_INPUT / (end_time-start_time)
                 fps_list.append(fps)
                 # latency_per_img = (end_time-start_time) / num_img
 
