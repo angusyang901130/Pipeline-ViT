@@ -61,8 +61,8 @@ def main():
 
     DEVICE = "cpu"
 
-    WARMUP = 1
-    NUM_TEST = 5
+    WARMUP = 0
+    NUM_TEST = 3
     NUM_IMGS = 200
 
     MINI_BATCH_SIZE = 1
@@ -150,28 +150,28 @@ def main():
     Running Serial
     '''
 
-    fps_list = []
+    # fps_list = []
 
-    if rank == world_size-1:
+    # if rank == world_size-1:
 
-        print("Running Serial...")
-        with torch.no_grad():
-            for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
+    #     print("Running Serial...")
+    #     with torch.no_grad():
+    #         for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
                 
-                tmp_imgs = torch.unsqueeze(imgs, dim=1)
-                start_time = time.perf_counter()
-                reference_output = run_serial(model=model, imgs=tmp_imgs)
-                end_time = time.perf_counter()
+    #             tmp_imgs = torch.unsqueeze(imgs, dim=1)
+    #             start_time = time.perf_counter()
+    #             reference_output = run_serial(model=model, imgs=tmp_imgs)
+    #             end_time = time.perf_counter()
                 
-                if i <= WARMUP:
-                    continue
+    #             if i <= WARMUP:
+    #                 continue
 
-                fps = NUM_IMGS / (end_time-start_time)
-                fps_list.append(fps)
+    #             fps = NUM_IMGS / (end_time-start_time)
+    #             fps_list.append(fps)
 
 
-        print('Throughput without pipeline (input batch size = %d): %.4f fps'%(SERIAL_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
-        time.sleep(10)
+    #     print('Throughput without pipeline (input batch size = %d): %.4f fps'%(SERIAL_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
+    #     time.sleep(10)
 
     '''
     Wait for serial to be done
@@ -195,13 +195,20 @@ def main():
 
             dist.barrier()
 
-            start_time = time.perf_counter()
+            start_time = torch.tensor(time.perf_counter())
             pipeline_output = run_pipeline(stage=stage, imgs=imgs, rank=rank, world_size=world_size)
-            end_time = time.perf_counter()
+            end_time = torch.tensor(time.perf_counter())
 
-            # if rank == 0 or rank == world_size-1:
-            #     print(f"Rank {rank} Start Time: {start_time}")
-            #     print(f"Rank {rank} End Time: {end_time}")
+            if rank == 0 or rank == world_size-1:
+                print(f"Rank {rank} Start Time: {start_time.item()}")
+                print(f"Rank {rank} End Time: {end_time.item()}")
+
+            dist.reduce(start_time, dst=world_size-1, op=torch.distributed.ReduceOp.MIN)
+            dist.reduce(end_time, dst=world_size-1, op=torch.distributed.ReduceOp.MAX)
+
+            if rank == world_size-1:
+                print(f"Reduced Start Time: {start_time.item()}")
+                print(f"Reduced End Time: {end_time.item()}")
 
             if i <= WARMUP:
                 continue
