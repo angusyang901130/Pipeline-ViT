@@ -199,16 +199,18 @@ def main():
             pipeline_output = run_pipeline(stage=stage, imgs=imgs, rank=rank, world_size=world_size)
             end_time = torch.tensor(time.perf_counter())
 
-            if rank == 0 or rank == world_size-1:
-                print(f"Rank {rank} Start Time: {start_time.item()}")
-                print(f"Rank {rank} End Time: {end_time.item()}")
+            # if rank == 0 or rank == world_size-1:
+            #     print(f"Rank {rank} Start Time: {start_time.item()}")
+            #     print(f"Rank {rank} End Time: {end_time.item()}")
+
+            dist.barrier()
 
             dist.reduce(start_time, dst=world_size-1, op=torch.distributed.ReduceOp.MIN)
             dist.reduce(end_time, dst=world_size-1, op=torch.distributed.ReduceOp.MAX)
 
-            if rank == world_size-1:
-                print(f"Reduced Start Time: {start_time.item()}")
-                print(f"Reduced End Time: {end_time.item()}")
+            # if rank == world_size-1:
+            #     print(f"Reduced Start Time: {start_time.item()}")
+            #     print(f"Reduced End Time: {end_time.item()}")
 
             if i <= WARMUP:
                 continue
