@@ -8,9 +8,6 @@ from tqdm import tqdm
 from collections import defaultdict
 from transformers import DeiTImageProcessor, DeiTForImageClassification, ViTForImageClassification
 import pippy
-import pippy.fx
-from pippy import run_pippy
-from pippy.hf import PiPPyHFTracer, inject_pipeline_forward
 from pippy.IR import annotate_split_points, Pipe, PipeSplitWrapper
 
 from PIL import Image
@@ -23,37 +20,64 @@ import logging
 # parallel-scp -r -A -h ~/hosts.txt ~/Pipeline-ViT/ ~/
 # torchrun   --nnodes=4   --nproc-per-node=1   --node-rank=0   --master-addr=192.168.1.100   --master-port=50000   pipeline_deit.py
 
-def run_serial(model, input_data, batch_size=1, num_iter=100):
+def run_serial(model, imgs):
+
+    result = None
 
     # for i in tqdm(range(num_iter)):
-    for i in range(num_iter):
-        output = model(input_data)
+    for img in imgs:
 
-def run_pipeline(driver, input_data, num_iter=10):
+        if result == None:
+            output = model(img)
+            result = output.logits
+        else:
+            output = model(img)
+            result = torch.cat((result, output.logits), dim=0)
+
+    return result
+
+def run_pipeline(stage, imgs, rank, world_size):
 
     # for i in tqdm(range(num_iter)):
-    for i in range(num_iter):
-        output = driver(input_data)
+    if rank == 0:
+        stage(imgs)
+    elif rank == world_size-1:
+        output = stage()
+    else:
+        stage()
+    
+    if rank == world_size-1:
+        return output
+    else:
+        return None
+    
 
-
-if __name__ == "__main__":
+def main():
 
     MODEL_NAME = "facebook/deit-small-distilled-patch16-224"
     # MODEL_NAME = "facebook/deit-small-patch16-224"
     # MODEL_NAME = "facebook/deit-tiny-distilled-patch16-224"
     # MODEL_NAME = "facebook/deit-tiny-patch16-224"
 
-    WARMUP = 1
-    NUM_TEST = 10
+    DEVICE = "cpu"
+
+    WARMUP = 0
+    NUM_TEST = 1
+    NUM_IMGS = 100
+
     MINI_BATCH_SIZE = 1
-    NUM_CHUNKS = 10
-    NUM_INPUT = NUM_CHUNKS * MINI_BATCH_SIZE
+    NUM_CHUNKS = 100
+
+    SERIAL_BATCH_SIZE = MINI_BATCH_SIZE
+    PIPELINE_BATCH_SIZE = NUM_CHUNKS * MINI_BATCH_SIZE
     # INPUT_PER_ITER = 4
 
     torch.manual_seed(0)
 
     model = DeiTForImageClassification.from_pretrained(MODEL_NAME)
     # model = ViTForImageClassification.from_pretrained(MODEL_NAME)
+
+    # model = torch.compile(model)
     model.eval()
         
     import os
@@ -62,10 +86,11 @@ if __name__ == "__main__":
     os.environ["TP_SOCKET_IFNAME"]="eth0" 
     os.environ["GLOO_SOCKET_IFNAME"]="eth0"
 
-    import torch.distributed.rpc as rpc
     import torch.distributed as dist
 
-    rpc.init_rpc(f"worker{rank}", rank=rank, world_size=world_size, backend=rpc.BackendType.TENSORPIPE)
+    dist.init_process_group(backend='gloo', rank=rank, world_size=world_size)
+
+    # rpc.init_rpc(f"worker{rank}", rank=rank, world_size=world_size, backend=rpc.BackendType.TENSORPIPE)
     # rpc.init_rpc(
     #     f"worker{rank}", 
     #     rank=rank, 
@@ -80,13 +105,13 @@ if __name__ == "__main__":
     print(f'LOCAL_RANK:{os.environ["LOCAL_RANK"]}')
     print(f'WORLD_SIZE:{os.environ["WORLD_SIZE"]}')
     print(f'LOCAL_WORLD_SIZE:{os.environ["LOCAL_WORLD_SIZE"]}')
+    print()
 
-    from pippy.PipelineDriver import PipelineDriverFillDrain
-    from pippy.microbatch import TensorChunkSpec
+    # from pippy.microbatch import TensorChunkSpec
 
-    args_chunk_spec: Any = (TensorChunkSpec(0),)
-    kwargs_chunk_spec: Any = {}
-    output_chunk_spec: Any = TensorChunkSpec(0)
+    # args_chunk_spec: Any = (TensorChunkSpec(0),)
+    # kwargs_chunk_spec: Any = {}
+    # output_chunk_spec: Any = TensorChunkSpec(0)
 
     # split_policy = pippy.split_into_equal_size(world_size)
     annotate_split_points(model, {'deit.encoder.layer.5': PipeSplitWrapper.SplitPoint.END})
@@ -97,109 +122,96 @@ if __name__ == "__main__":
     # input = feature_extractor(images=image, return_tensors="pt")
     # image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
     # inputs = image_processor(images=image, return_tensors="pt").pixel_values
-    serial_input = torch.randn(1, 3, 224, 224)
-    pipeline_input = torch.randn(NUM_INPUT, 3, 224, 224)
 
-    # print(inputs)
-    # print(max(inputs))
-    # print(min(inputs))
-    # input_dict = {
-    #     'pixel_values': inputs,
-    # }
+    # serial_input = torch.randn(SERIAL_BATCH_SIZE, 3, 224, 224)
+    # pipeline_input = torch.randn(PIPELINE_BATCH_SIZE, 3, 224, 224)
+    imgs = torch.randn(NUM_IMGS, 3, 224, 224)
 
-    input_dict = {
-        'pixel_values': input,
-    }
+    pipe = Pipe.from_tracing(model, NUM_CHUNKS, example_args=(imgs, ))
+    # print(pipe)
 
-    concrete_args = pippy.create_default_args(
-        model,
-        except_keys=input_dict.keys(),
-    )
-
-    driver, stage_mod = pippy.all_compile(
-        model,
-        num_ranks=world_size,
-        num_chunks=NUM_CHUNKS,
-        # split_policy=split_policy,
-        tracer=PiPPyHFTracer(),
-        concrete_args=concrete_args,
-        index_filename=None,
-        checkpoint_prefix=None,
-        # args_chunk_spec=args_chunk_spec,
-        # kwargs_chunk_spec=kwargs_chunk_spec,
-        # output_chunk_spec=output_chunk_spec
-    )
-
-    print(" Pipeline parallel sub module params ".center(80, "*"))
-    params = sum(p.numel() for p in stage_mod.parameters() if p.requires_grad)
-    print(f"submod_{os.environ['RANK']} {params // 10 ** 6}M params", end='\n\n')
-    # stage_mod.print_readable()
-
+    nstages = len(list(pipe.split_gm.children()))
     if rank == 0:
 
         print(" Original module params ".center(80, "*"))
-        params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Original {params // 10 ** 6}M params", end='\n\n')
-        # print(model)
-        print(" Calculating Latency ".center(80, "*"))
+        params = sum(p.numel() for p in model.parameters() if p.requires_grad)   
+        print(f"Original module params: {params // 10 ** 6}M params")
 
-        num_img = 100
-        fps_list = []
+        for i, sm in enumerate(pipe.split_gm.children()):
+            params = sum(p.numel() for p in sm.parameters() if p.requires_grad)
+            print(f"Pipeline Stage {i} params: {params // 10 ** 6}M params")
+
+
+    from pippy.PipelineStage import PipelineStage
+    stage = PipelineStage(pipe, rank, DEVICE)
+
+    '''
+    Running Serial
+    '''
+
+    fps_list = []
+
+    if rank == world_size-1:
 
         print("Running Serial...")
         with torch.no_grad():
             for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
                 
+                tmp_imgs = torch.unsqueeze(imgs, dim=1)
                 start_time = time.perf_counter()
-                run_serial(model=model, input_data=serial_input)
+                reference_output = run_serial(model=model, imgs=tmp_imgs)
                 end_time = time.perf_counter()
                 
                 if i <= WARMUP:
                     continue
 
-                fps = num_img / (end_time-start_time)
+                fps = NUM_IMGS / (end_time-start_time)
                 fps_list.append(fps)
-                # latency_per_img = (end_time-start_time) / num_img
+                # latency_per_img = (end_time-start_time) / NUM_IMGS
 
 
-        # print('Latency per image without pipeline (input batch size = %d): %.2f ms'%(serial_input.shape[0], (end_time-start_time)*1000))
-        print('Throughput without pipeline (input batch size = %d): %.4f fps'%(serial_input.shape[0], np.mean(fps_list)), end='\n\n')
+        print('Throughput without pipeline (input batch size = %d): %.4f fps'%(SERIAL_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
 
-        time.sleep(10)
-        fps_list = []
+
+    dist.barrier()
+    time.sleep(10)
+
+    '''
+    Running Pipeline
+    '''
+
+    fps_list = []
         
-        print("Running Pipeline...")
-        with torch.no_grad():
-            
-            for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
-                start_time = time.perf_counter()
-                run_pipeline(driver=driver, input_data=pipeline_input)
-                end_time = time.perf_counter()
+    print("Running Pipeline...")
+    with torch.no_grad():
 
-                if i <= WARMUP:
-                    continue
+        for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
 
-                fps = num_img / (end_time-start_time)
+            start_time = time.perf_counter()
+            pipeline_output = run_pipeline(stage=stage, imgs=imgs, rank=rank, world_size=world_size)
+            end_time = time.perf_counter()
+
+            if rank == 0 or rank == world_size-1:
+                print(f"Rank {rank} Start Time: {start_time}")
+                print(f"Rank {rank} End Time: {end_time}")
+
+            if i <= WARMUP:
+                continue
+
+            if rank == world_size - 1:
+                fps = NUM_IMGS / (end_time-start_time)
                 fps_list.append(fps)
-                # latency_per_img = (end_time-start_time) / num_img
+            # latency_per_img = (end_time-start_time) / NUM_IMGS
 
-        # print('Latency per image with %d pipeline stages (mini batch size = %d): %.2f ms'%(world_size, MINI_BATCH_SIZE, latency_per_img*1000))
+    if rank == world_size - 1:
         print('Throughput with %d pipeline stages (mini batch size = %d): %.4f fps'%(world_size, MINI_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
         
+        torch.testing.assert_close(pipeline_output, reference_output)
+
+        print(" Pipeline parallel model ran successfully! ".center(80, "*"))
+
+    dist.destroy_process_group()
 
 
-        # Run the original code and get the output for comparison
-
-
-        # output = driver(**inputs)
-        # reference_output = model(**inputs)
-
-        # output = driver(input)
-        # reference_output = model(input)
-        
-        # torch.testing.assert_close(output, reference_output)
-
-        # print(" Pipeline parallel model ran successfully! ".center(80, "*"))
-
-    # destroy_process_group()
-    rpc.shutdown()
+if __name__ == "__main__":
+    main()
