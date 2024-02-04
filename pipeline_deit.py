@@ -20,13 +20,9 @@ import logging
 # parallel-scp -r -A -h ~/hosts.txt ~/Pipeline-ViT/ ~/
 # torchrun   --nnodes=2   --nproc-per-node=1   --node-rank=0   --master-addr=192.168.1.102   --master-port=50000   pipeline_deit.py
 
-<<<<<<< HEAD
 def run_serial(model, imgs):
 
     result = None
-=======
-def run_serial(model, input_data, num_iter=100):
->>>>>>> 0541214cc9144474f693e3e9dfccbae99fc6573e
 
     # for i in tqdm(range(num_iter)):
     for img in imgs:
@@ -62,7 +58,6 @@ def main():
     # MODEL_NAME = "facebook/deit-small-patch16-224"
     # MODEL_NAME = "facebook/deit-tiny-distilled-patch16-224"
     # MODEL_NAME = "facebook/deit-tiny-patch16-224"
-<<<<<<< HEAD
 
     DEVICE = "cpu"
 
@@ -75,14 +70,6 @@ def main():
 
     SERIAL_BATCH_SIZE = MINI_BATCH_SIZE
     PIPELINE_BATCH_SIZE = NUM_CHUNKS * MINI_BATCH_SIZE
-=======
-    num_img = 100
-    WARMUP = 1
-    NUM_TEST = 10
-    MINI_BATCH_SIZE = 1
-    NUM_CHUNKS = 100
-    NUM_INPUT = NUM_CHUNKS * MINI_BATCH_SIZE
->>>>>>> 0541214cc9144474f693e3e9dfccbae99fc6573e
     # INPUT_PER_ITER = 4
 
     torch.manual_seed(0)
