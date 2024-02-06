@@ -111,7 +111,7 @@ def main():
     # )
 
     import os
-    print(f'Rank:{os.environ["RANK"]} / World_Size:{os.environ["WORLD_SIZE"]}\nLocal_Rank:{os.environ["LOCAL_RANK"]} / Local_World_Size{os.environ["LOCAL_WORLD_SIZE"]}')
+    print(f'Rank:{os.environ["RANK"]} / World_Size:{os.environ["WORLD_SIZE"]}\nLocal_Rank:{os.environ["LOCAL_RANK"]} / Local_World_Size:{os.environ["LOCAL_WORLD_SIZE"]}')
 
     # split_policy = pippy.split_into_equal_size(world_size)
     annotate_split_points(model, {'deit.encoder.layer.2': PipeSplitWrapper.SplitPoint.END})
