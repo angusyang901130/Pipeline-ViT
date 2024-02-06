@@ -21,7 +21,7 @@ import threading
 # parallel-scp -r -A -h ~/hosts.txt ~/Pipeline-ViT/ ~/
 # torchrun   --nnodes=2   --nproc-per-node=1   --node-rank=0   --master-addr=192.168.1.102   --master-port=50000   pipeline_deit.py
 
-def PrintThreadInfo():
+def PrintThreadInfo(rank):
 
     print(f"**************** My Rank: {rank} ****************")
     print(f'RANK:{os.environ["RANK"]}')
@@ -116,7 +116,7 @@ def main():
 
     lock.acquire()
     try:
-        PrintThreadInfo()
+        PrintThreadInfo(rank=rank)
     finally:
         lock.release()
 
