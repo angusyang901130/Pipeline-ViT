@@ -89,7 +89,9 @@ def main():
     # print(model)    
         
     rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
+
     os.environ["TP_SOCKET_IFNAME"]="eth0" 
     os.environ["GLOO_SOCKET_IFNAME"]="eth0"
     os.environ["GLOO_TIMEOUT_SECONDS"] = "3600"
@@ -109,7 +111,7 @@ def main():
     # )
 
     import os
-    print(f'Rank: {os.environ["RANK"]}/{os.environ["WORLD_SIZE"]} Local_Rank: {os.environ["LOCAL_RANK"]}/{os.environ["LOCAL_WORLD_SIZE"]}')
+    print(f'Rank:{os.environ["RANK"]} / World_Size:{os.environ["WORLD_SIZE"]}\nLocal_Rank:{os.environ["LOCAL_RANK"]} / Local_World_Size{os.environ["LOCAL_WORLD_SIZE"]}')
 
     # split_policy = pippy.split_into_equal_size(world_size)
     annotate_split_points(model, {'deit.encoder.layer.2': PipeSplitWrapper.SplitPoint.END})
@@ -150,19 +152,21 @@ def main():
     fps_list = []
 
     print("Running Serial...")
-    with torch.no_grad():
-        for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
-            
-            tmp_imgs = torch.unsqueeze(imgs, dim=1)
-            start_time = time.perf_counter()
-            reference_output = RunSerial(model=model, imgs=tmp_imgs)
-            end_time = time.perf_counter()
-            
-            if i <= WARMUP:
-                continue
+    if local_rank == 0:
+        with torch.no_grad():
+            for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
+                
+                tmp_imgs = torch.unsqueeze(imgs, dim=1)
+                start_time = time.perf_counter()
+                reference_output = RunSerial(model=model, imgs=tmp_imgs)
+                end_time = time.perf_counter()
+                
+                if i <= WARMUP:
+                    continue
 
-            fps = NUM_IMGS / (end_time-start_time)
-            fps_list.append(fps)
+                fps = NUM_IMGS / (end_time-start_time)
+                fps_list.append(fps)
+            
 
     avg_fps = torch.tensor(np.mean(fps_list))
 
