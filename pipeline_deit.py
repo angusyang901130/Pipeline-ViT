@@ -6,29 +6,23 @@ import time
 import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
+
 from transformers import DeiTImageProcessor, DeiTForImageClassification, ViTForImageClassification
+
 import pippy
 from pippy.IR import annotate_split_points, Pipe, PipeSplitWrapper
+
+import torch.distributed.rpc as rpc
+import torch.profiler as profiler
 
 from PIL import Image
 import requests
 from accelerate import Accelerator
-import torch.distributed.rpc as rpc
-import torch.profiler as profiler
 import logging
 import threading
 
 # parallel-scp -r -A -h ~/hosts.txt ~/Pipeline-ViT/ ~/
 # torchrun   --nnodes=2   --nproc-per-node=1   --node-rank=0   --master-addr=192.168.1.102   --master-port=50000   pipeline_deit.py
-
-def PrintThreadInfo(rank):
-
-    print(f"**************** My Rank: {rank} ****************")
-    print(f'RANK:{os.environ["RANK"]}')
-    print(f'LOCAL_RANK:{os.environ["LOCAL_RANK"]}')
-    print(f'WORLD_SIZE:{os.environ["WORLD_SIZE"]}')
-    print(f'LOCAL_WORLD_SIZE:{os.environ["LOCAL_WORLD_SIZE"]}')
-    print()
 
 def RunSerial(model, imgs):
 
@@ -45,6 +39,7 @@ def RunSerial(model, imgs):
             result = torch.cat((result, output.logits), dim=0)
 
     return result
+
 
 def RunPipeline(stage, imgs, rank, world_size):
 
@@ -93,7 +88,6 @@ def main():
     model.eval()
     # print(model)    
         
-    import os
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     os.environ["TP_SOCKET_IFNAME"]="eth0" 
@@ -114,12 +108,8 @@ def main():
     #     )
     # )
 
-    lock.acquire()
-    try:
-        PrintThreadInfo(rank=rank)
-    finally:
-        lock.release()
-
+    import os
+    print(f'Rank: {os.environ["RANK"]}/{os.environ["WORLD_SIZE"]} Local_Rank: {os.environ["LOCAL_RANK"]}/{os.environ["LOCAL_WORLD_SIZE"]}')
 
     # split_policy = pippy.split_into_equal_size(world_size)
     annotate_split_points(model, {'deit.encoder.layer.2': PipeSplitWrapper.SplitPoint.END})
