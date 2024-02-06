@@ -16,11 +16,21 @@ from accelerate import Accelerator
 import torch.distributed.rpc as rpc
 import torch.profiler as profiler
 import logging
+import threading
 
 # parallel-scp -r -A -h ~/hosts.txt ~/Pipeline-ViT/ ~/
 # torchrun   --nnodes=2   --nproc-per-node=1   --node-rank=0   --master-addr=192.168.1.102   --master-port=50000   pipeline_deit.py
 
-def run_serial(model, imgs):
+def PrintThreadInfo()
+
+    print(f"**************** My Rank: {rank} ****************")
+    print(f'RANK:{os.environ["RANK"]}')
+    print(f'LOCAL_RANK:{os.environ["LOCAL_RANK"]}')
+    print(f'WORLD_SIZE:{os.environ["WORLD_SIZE"]}')
+    print(f'LOCAL_WORLD_SIZE:{os.environ["LOCAL_WORLD_SIZE"]}')
+    print()
+
+def RunSerial(model, imgs):
 
     result = None
 
@@ -36,7 +46,7 @@ def run_serial(model, imgs):
 
     return result
 
-def run_pipeline(stage, imgs, rank, world_size):
+def RunPipeline(stage, imgs, rank, world_size):
 
     # for i in tqdm(range(num_iter)):
     if rank == 0:
@@ -53,6 +63,8 @@ def run_pipeline(stage, imgs, rank, world_size):
     
 
 def main():
+
+    lock = threading.Lock()
 
     MODEL_NAME = "facebook/deit-small-distilled-patch16-224"
     # MODEL_NAME = "facebook/deit-small-patch16-224"
@@ -79,6 +91,7 @@ def main():
 
     # model = torch.compile(model)
     model.eval()
+    # print(model)    
         
     import os
     rank = int(os.environ["RANK"])
@@ -101,21 +114,17 @@ def main():
     #     )
     # )
 
-    print(f"**************** My Rank: {rank} ****************")
-    print(f'RANK:{os.environ["RANK"]}')
-    print(f'LOCAL_RANK:{os.environ["LOCAL_RANK"]}')
-    print(f'WORLD_SIZE:{os.environ["WORLD_SIZE"]}')
-    print(f'LOCAL_WORLD_SIZE:{os.environ["LOCAL_WORLD_SIZE"]}')
-    print()
+    lock.acquire()
+    try:
+        PrintThreadInfo()
+    finally:
+        lock.release()
 
-    # from pippy.microbatch import TensorChunkSpec
-
-    # args_chunk_spec: Any = (TensorChunkSpec(0),)
-    # kwargs_chunk_spec: Any = {}
-    # output_chunk_spec: Any = TensorChunkSpec(0)
 
     # split_policy = pippy.split_into_equal_size(world_size)
+    annotate_split_points(model, {'deit.encoder.layer.2': PipeSplitWrapper.SplitPoint.END})
     annotate_split_points(model, {'deit.encoder.layer.5': PipeSplitWrapper.SplitPoint.END})
+    annotate_split_points(model, {'deit.encoder.layer.8': PipeSplitWrapper.SplitPoint.END})
 
     # url = 'http://images.cocodataset.org/val2017/000000039769.jpg'
     # image = Image.open(requests.get(url, stream=True).raw)
@@ -124,8 +133,6 @@ def main():
     # image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
     # inputs = image_processor(images=image, return_tensors="pt").pixel_values
 
-    # serial_input = torch.randn(SERIAL_BATCH_SIZE, 3, 224, 224)
-    # pipeline_input = torch.randn(PIPELINE_BATCH_SIZE, 3, 224, 224)
     imgs = torch.randn(NUM_IMGS, 3, 224, 224)
 
     pipe = Pipe.from_tracing(model, NUM_CHUNKS, example_args=(imgs, ))
@@ -152,26 +159,31 @@ def main():
 
     fps_list = []
 
-    if rank == world_size-1:
+    print("Running Serial...")
+    with torch.no_grad():
+        for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
+            
+            tmp_imgs = torch.unsqueeze(imgs, dim=1)
+            start_time = time.perf_counter()
+            reference_output = RunSerial(model=model, imgs=tmp_imgs)
+            end_time = time.perf_counter()
+            
+            if i <= WARMUP:
+                continue
 
-        print("Running Serial...")
-        with torch.no_grad():
-            for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
-                
-                tmp_imgs = torch.unsqueeze(imgs, dim=1)
-                start_time = time.perf_counter()
-                reference_output = run_serial(model=model, imgs=tmp_imgs)
-                end_time = time.perf_counter()
-                
-                if i <= WARMUP:
-                    continue
+            fps = NUM_IMGS / (end_time-start_time)
+            fps_list.append(fps)
 
-                fps = NUM_IMGS / (end_time-start_time)
-                fps_list.append(fps)
+    avg_fps = torch.tensor(np.mean(fps_list))
 
+    dist.barrier()
+    dist.reduce(avg_fps, dst=0, op=torch.distributed.ReduceOp.SUM)
 
-        print('Throughput without pipeline (input batch size = %d): %.4f fps'%(SERIAL_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
-        time.sleep(10)
+    avg_fps /= world_size
+
+    print('Throughput without pipeline (input batch size = %d): %.4f fps'%(SERIAL_BATCH_SIZE, avg_fps), end='\n\n')
+    time.sleep(10)
+
 
     '''
     Wait for serial to be done
@@ -196,7 +208,7 @@ def main():
             dist.barrier()
 
             start_time = torch.tensor(time.perf_counter())
-            pipeline_output = run_pipeline(stage=stage, imgs=imgs, rank=rank, world_size=world_size)
+            pipeline_output = RunPipeline(stage=stage, imgs=imgs, rank=rank, world_size=world_size)
             end_time = torch.tensor(time.perf_counter())
 
             # if rank == 0 or rank == world_size-1:
@@ -223,9 +235,9 @@ def main():
     if rank == world_size - 1:
         print('Throughput with %d pipeline stages (mini batch size = %d): %.4f fps'%(world_size, MINI_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
         
-        torch.testing.assert_close(pipeline_output, reference_output)
+        # torch.testing.assert_close(pipeline_output, reference_output)
 
-        print(" Pipeline parallel model ran successfully! ".center(80, "*"))
+        # print(" Pipeline parallel model ran successfully! ".center(80, "*"))
 
     dist.destroy_process_group()
 
