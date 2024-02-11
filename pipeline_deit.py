@@ -6,23 +6,27 @@ import time
 import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
+
 from transformers import DeiTImageProcessor, DeiTForImageClassification, ViTForImageClassification
+
 import pippy
 from pippy.IR import annotate_split_points, Pipe, PipeSplitWrapper
+
+import torch.distributed.rpc as rpc
+import torch.profiler as profiler
 
 from PIL import Image
 import requests
 from accelerate import Accelerator
-import torch.distributed.rpc as rpc
-import torch.profiler as profiler
 import logging
+import threading
 
 import argparse
 
 # parallel-scp -r -A -h ~/hosts.txt ~/Pipeline-ViT/ ~/
 # torchrun   --nnodes=2   --nproc-per-node=1   --node-rank=0   --master-addr=192.168.1.102   --master-port=50000   pipeline_deit.py
 
-def run_serial(model, imgs):
+def RunSerial(model, imgs):
 
     result = None
 
@@ -38,7 +42,8 @@ def run_serial(model, imgs):
 
     return result
 
-def run_pipeline(stage, imgs, rank, world_size):
+
+def RunPipeline(stage, imgs, rank, world_size):
 
     # for i in tqdm(range(num_iter)):
     if rank == 0:
@@ -61,6 +66,8 @@ def main():
     parser.add_argument('--num_interop_threads', type=int, default=4)
     args = parser.parse_args()
 
+
+    lock = threading.Lock()
 
     MODEL_NAME = "facebook/deit-small-distilled-patch16-224"
     # MODEL_NAME = "facebook/deit-small-patch16-224"
@@ -89,15 +96,24 @@ def main():
     model = DeiTForImageClassification.from_pretrained(MODEL_NAME)
     # model = ViTForImageClassification.from_pretrained(MODEL_NAME)
 
-    # model = torch.compile(model)
     model.eval()
-        
-    import os
+    # print(model)   
+
+    import os        
     rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
+    local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+
     os.environ["TP_SOCKET_IFNAME"]="eth0" 
     os.environ["GLOO_SOCKET_IFNAME"]="eth0"
     os.environ["GLOO_TIMEOUT_SECONDS"] = "3600"
+<<<<<<< HEAD
+=======
+    os.environ["OMP_NUM_THREADS"] = "2"
+
+    # print(f"OMP_NUM_THREAD = {os.environ.get('OMP_NUM_THREADS')}")
+>>>>>>> 65c9a8505c8e0bdcee3f0374234a295c66eb397a
 
     import torch.distributed as dist
     dist.init_process_group(backend='gloo', rank=rank, world_size=world_size)
@@ -115,6 +131,7 @@ def main():
     #     )
     # )
 
+<<<<<<< HEAD
     print(f"**************** My Rank: {rank} ****************")
     print(f'RANK:{os.environ["RANK"]}')
     print(f'LOCAL_RANK:{os.environ["LOCAL_RANK"]}')
@@ -139,6 +156,14 @@ def main():
         annotate_split_points(model, {'deit.encoder.layer.1': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.3': PipeSplitWrapper.SplitPoint.END, 
             'deit.encoder.layer.5': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.7': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.9': PipeSplitWrapper.SplitPoint.END})
 
+=======
+    # print(f'Rank:{os.environ["RANK"]} / World_Size:{os.environ["WORLD_SIZE"]}\nLocal_Rank:{os.environ["LOCAL_RANK"]} / Local_World_Size:{os.environ["LOCAL_WORLD_SIZE"]}')
+
+    # split_policy = pippy.split_into_equal_size(world_size)
+    annotate_split_points(model, {'deit.encoder.layer.2': PipeSplitWrapper.SplitPoint.END})
+    annotate_split_points(model, {'deit.encoder.layer.5': PipeSplitWrapper.SplitPoint.END})
+    annotate_split_points(model, {'deit.encoder.layer.8': PipeSplitWrapper.SplitPoint.END})
+>>>>>>> 65c9a8505c8e0bdcee3f0374234a295c66eb397a
 
     # url = 'http://images.cocodataset.org/val2017/000000039769.jpg'
     # image = Image.open(requests.get(url, stream=True).raw)
@@ -147,9 +172,13 @@ def main():
     # image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
     # inputs = image_processor(images=image, return_tensors="pt").pixel_values
 
+<<<<<<< HEAD
     serial_input = torch.randn(NUM_CHUNKS, SERIAL_BATCH_SIZE, 3, 224, 224)
     pipeline_input = torch.randn(NUM_IMGS, 3, 224, 224)
     # imgs = torch.randn(NUM_IMGS, 3, 224, 224)
+=======
+    imgs = torch.randn(NUM_IMGS, 3, 224, 224)
+>>>>>>> 65c9a8505c8e0bdcee3f0374234a295c66eb397a
 
     pipe = Pipe.from_tracing(model, NUM_CHUNKS, example_args=(pipeline_input, ))
     # print(pipe)
@@ -157,29 +186,86 @@ def main():
     nstages = len(list(pipe.split_gm.children()))
     if rank == 0:
 
-        print(" Original module params ".center(80, "*"))
-        params = sum(p.numel() for p in model.parameters() if p.requires_grad)   
-        print(f"Original module params: {params // 10 ** 6}M params")
+        print(" Module params Info ".center(80, "*"))
+        params_in_M = sum(p.numel() for p in model.parameters() if p.requires_grad) / 10**6
+        print(f'Original module params: {params_in_M:.4f}M params')
 
         for i, sm in enumerate(pipe.split_gm.children()):
-            params = sum(p.numel() for p in sm.parameters() if p.requires_grad)
-            print(f"Pipeline Stage {i} params: {params // 10 ** 6}M params")
+            params_in_M = sum(p.numel() for p in sm.parameters() if p.requires_grad) / 10**6
+            print(f'Pipeline Stage {i} params: {params_in_M:.4f}M params')
+    
+        print("".center(100, "*"))
 
+<<<<<<< HEAD
+=======
+    '''
+    Running Serial
+    '''
+
+    fps_list = []
+    serial_fps = 0
+    tensor_serial_fps = torch.tensor(0)
+
+    if local_rank == 0:
+        print(f"Running Serial on Rank {rank} ...")
+        with torch.no_grad():
+            for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
+                
+                tmp_imgs = torch.unsqueeze(imgs, dim=1)
+                start_time = time.perf_counter()
+                reference_output = RunSerial(model=model, imgs=tmp_imgs)
+                end_time = time.perf_counter()
+                
+                if i <= WARMUP:
+                    continue
+
+                fps = NUM_IMGS / (end_time-start_time)
+                fps_list.append(fps)
+            
+        time.sleep(10)
+
+        tensor_serial_fps = torch.tensor(np.mean(fps_list))
+        # print(f'tensor_serial_fps = {tensor_serial_fps} on Rank {rank}')
+
+    dist.reduce(tensor_serial_fps, dst=0, op=dist.ReduceOp.SUM)
+        
+    if rank == 0:
+
+        num_machine = world_size / local_world_size
+        serial_fps = tensor_serial_fps.item() / num_machine
+>>>>>>> 65c9a8505c8e0bdcee3f0374234a295c66eb397a
+
+        print('Throughput without pipeline (input batch size = %d): %.4f fps'%(SERIAL_BATCH_SIZE, serial_fps), end='\n\n')
+
+<<<<<<< HEAD
+=======
+
+    '''
+    Wait for serial to be done
+    '''
+    dist.barrier()
+    # os.environ["OMP_NUM_THREADS"] = "2"
 
     from pippy.PipelineStage import PipelineStage
     stage = PipelineStage(pipe, rank, DEVICE)
 
-
-
+>>>>>>> 65c9a8505c8e0bdcee3f0374234a295c66eb397a
     '''
     Running Pipeline
     '''
-
     fps_list = []
+    pipeline_fps = 0
         
-    print("Running Pipeline...")
+    # print(f"Running Pipeline on Rank {rank} ...")
     with torch.no_grad():
+        
+    # if local_rank == 0:
+        for i in tqdm(range(1, NUM_TEST+WARMUP+1)):               
+            '''
+            To be fair, all threads has to be on same point
+            '''
 
+<<<<<<< HEAD
         for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
             
             '''
@@ -204,21 +290,82 @@ def main():
             # if rank == world_size-1:
             #     print(f"Reduced Start Time: {start_time.item()}")
             #     print(f"Reduced End Time: {end_time.item()}")
+=======
+            dist.barrier()
+
+            tensor_start_time = torch.tensor(time.perf_counter())
+            pipeline_output = RunPipeline(stage=stage, imgs=imgs, rank=rank, world_size=world_size)
+            tensor_end_time = torch.tensor(time.perf_counter())
+
+
+            dist.barrier()
+
+            dist.reduce(tensor_start_time, dst=0, op=dist.ReduceOp.MIN)
+            dist.reduce(tensor_end_time, dst=0, op=dist.ReduceOp.MAX)
+>>>>>>> 65c9a8505c8e0bdcee3f0374234a295c66eb397a
 
             if i <= WARMUP:
                 continue
 
-            if rank == world_size - 1:
+            if rank == 0:
+                start_time = tensor_start_time.item()
+                end_time = tensor_end_time.item()
+
                 fps = NUM_IMGS / (end_time-start_time)
                 fps_list.append(fps)
 
+        # else:
+        #     for i in range(1, NUM_TEST+WARMUP+1):             
+        #         '''
+        #         To be fair, all threads has to be on same point
+        #         '''
 
+<<<<<<< HEAD
     if rank == world_size - 1:
         print('Throughput with %d pipeline stages (mini batch size = %d): %.4f fps'%(world_size, MINI_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
         pipeline_fps = np.mean(fps_list)
         # torch.testing.assert_close(pipeline_output, reference_output)
 
         # print(" Pipeline parallel model ran successfully! ".center(80, "*"))
+=======
+        #         dist.barrier()
+
+        #         tensor_start_time = torch.tensor(time.perf_counter())
+        #         pipeline_output = RunPipeline(stage=stage, imgs=imgs, rank=rank, world_size=world_size)
+        #         tensor_end_time = torch.tensor(time.perf_counter())
+
+        #         dist.barrier()
+
+        #         dist.reduce(tensor_start_time, dst=0, op=dist.ReduceOp.MIN)
+        #         dist.reduce(tensor_end_time, dst=0, op=dist.ReduceOp.MAX)
+
+        #         if i <= WARMUP:
+        #             continue
+
+        #         if rank == 0:
+        #             start_time = tensor_start_time.item()
+        #             end_time = tensor_end_time.item()
+
+        #             fps = NUM_IMGS / (end_time-start_time)
+        #             fps_list.append(fps)
+
+        # if rank == world_size-1:
+        #     dist.send(pipeline_output, dst=0)
+        # elif rank == 0:
+        #     pipeline_output = torch.zeros(reference_output.shape)
+        #     dist.recv(pipeline_output, src=world_size-1)
+
+
+    if rank == 0:
+        pipeline_fps = np.mean(fps_list)
+        print('Throughput with %d pipeline stages (mini batch size = %d): %.4f fps'%(world_size, MINI_BATCH_SIZE, pipeline_fps))
+
+        speedup = pipeline_fps / serial_fps
+        print(f'The speedup of pipeline is {speedup:.4f}x', end='\n\n')
+        
+        torch.testing.assert_close(pipeline_output, reference_output)
+        print(" Pipeline parallel model ran successfully! ".center(80, "*"))
+>>>>>>> 65c9a8505c8e0bdcee3f0374234a295c66eb397a
 
     # '''
     # Running Serial
