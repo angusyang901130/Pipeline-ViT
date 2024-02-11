@@ -6,27 +6,23 @@ import time
 import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
-
 from transformers import DeiTImageProcessor, DeiTForImageClassification, ViTForImageClassification
-
 import pippy
 from pippy.IR import annotate_split_points, Pipe, PipeSplitWrapper
-
-import torch.distributed.rpc as rpc
-import torch.profiler as profiler
 
 from PIL import Image
 import requests
 from accelerate import Accelerator
+import torch.distributed.rpc as rpc
+import torch.profiler as profiler
 import logging
-import threading
 
 import argparse
 
 # parallel-scp -r -A -h ~/hosts.txt ~/Pipeline-ViT/ ~/
 # torchrun   --nnodes=2   --nproc-per-node=1   --node-rank=0   --master-addr=192.168.1.102   --master-port=50000   pipeline_deit.py
 
-def RunSerial(model, imgs):
+def run_serial(model, imgs):
 
     result = None
 
@@ -42,8 +38,7 @@ def RunSerial(model, imgs):
 
     return result
 
-
-def RunPipeline(stage, imgs, rank, world_size):
+def run_pipeline(stage, imgs, rank, world_size):
 
     # for i in tqdm(range(num_iter)):
     if rank == 0:
@@ -66,8 +61,6 @@ def main():
     parser.add_argument('--num_interop_threads', type=int, default=4)
     args = parser.parse_args()
 
-
-    lock = threading.Lock()
 
     MODEL_NAME = "facebook/deit-small-distilled-patch16-224"
     # MODEL_NAME = "facebook/deit-small-patch16-224"
@@ -96,15 +89,12 @@ def main():
     model = DeiTForImageClassification.from_pretrained(MODEL_NAME)
     # model = ViTForImageClassification.from_pretrained(MODEL_NAME)
 
+    # model = torch.compile(model)
     model.eval()
-    # print(model)   
-
-    import os        
+        
+    import os
     rank = int(os.environ["RANK"])
-    local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
-    local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
-
     os.environ["TP_SOCKET_IFNAME"]="eth0" 
     os.environ["GLOO_SOCKET_IFNAME"]="eth0"
     os.environ["GLOO_TIMEOUT_SECONDS"] = "3600"
@@ -167,33 +157,28 @@ def main():
     nstages = len(list(pipe.split_gm.children()))
     if rank == 0:
 
-        print(" Module params Info ".center(80, "*"))
-        params_in_M = sum(p.numel() for p in model.parameters() if p.requires_grad) / 10**6
-        print(f'Original module params: {params_in_M:.4f}M params')
+        print(" Original module params ".center(80, "*"))
+        params = sum(p.numel() for p in model.parameters() if p.requires_grad)   
+        print(f"Original module params: {params // 10 ** 6}M params")
 
         for i, sm in enumerate(pipe.split_gm.children()):
-            params_in_M = sum(p.numel() for p in sm.parameters() if p.requires_grad) / 10**6
-            print(f'Pipeline Stage {i} params: {params_in_M:.4f}M params')
-    
-        print("".center(100, "*"))
+            params = sum(p.numel() for p in sm.parameters() if p.requires_grad)
+            print(f"Pipeline Stage {i} params: {params // 10 ** 6}M params")
 
 
-        print('Throughput without pipeline (input batch size = %d): %.4f fps'%(SERIAL_BATCH_SIZE, serial_fps), end='\n\n')
+    from pippy.PipelineStage import PipelineStage
+    stage = PipelineStage(pipe, rank, DEVICE)
+
+
 
     '''
     Running Pipeline
     '''
+
     fps_list = []
-    pipeline_fps = 0
         
-    # print(f"Running Pipeline on Rank {rank} ...")
+    print("Running Pipeline...")
     with torch.no_grad():
-        
-    # if local_rank == 0:
-        for i in tqdm(range(1, NUM_TEST+WARMUP+1)):               
-            '''
-            To be fair, all threads has to be on same point
-            '''
 
         for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
             
@@ -223,18 +208,10 @@ def main():
             if i <= WARMUP:
                 continue
 
-            if rank == 0:
-                start_time = tensor_start_time.item()
-                end_time = tensor_end_time.item()
-
+            if rank == world_size - 1:
                 fps = NUM_IMGS / (end_time-start_time)
                 fps_list.append(fps)
 
-        # else:
-        #     for i in range(1, NUM_TEST+WARMUP+1):             
-        #         '''
-        #         To be fair, all threads has to be on same point
-        #         '''
 
     if rank == world_size - 1:
         print('Throughput with %d pipeline stages (mini batch size = %d): %.4f fps'%(world_size, MINI_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
