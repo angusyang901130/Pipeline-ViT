@@ -4,7 +4,7 @@ import torch
 from typing import Any
 import time
 import numpy as np
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from collections import defaultdict
 from transformers import DeiTImageProcessor, DeiTForImageClassification, ViTForImageClassification
 import pippy
@@ -40,7 +40,6 @@ def run_serial(model, imgs):
 
 def run_pipeline(stage, imgs, rank, world_size):
 
-    # for i in tqdm(range(num_iter)):
     if rank == 0:
         stage(imgs)
     elif rank == world_size-1:

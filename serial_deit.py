@@ -4,7 +4,7 @@ import torch
 from typing import Any
 import time
 import numpy as np
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from collections import defaultdict
 from transformers import DeiTImageProcessor, DeiTForImageClassification, ViTForImageClassification
 import pippy
@@ -80,6 +80,7 @@ def main():
     torch.set_num_interop_threads(args.num_interop_threads)
     print(f'intra op threads num: {torch.get_num_threads()} | inter op threads num: {torch.get_num_interop_threads()}')
     # print(f'inter op threads num: {torch.get_num_interop_threads()}')
+
     fps_list = []
     print("Running Serial...")
     with torch.no_grad():
