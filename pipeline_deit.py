@@ -69,6 +69,7 @@ def main():
     DEVICE = "cpu"
     torch.set_num_threads(args.num_threads)
     torch.set_num_interop_threads(args.num_interop_threads)
+    print(f'intra op threads num: {torch.get_num_threads()} | inter op threads num: {torch.get_num_interop_threads()}')
 
     WARMUP = 0
     NUM_TEST = 3
@@ -84,6 +85,7 @@ def main():
     # INPUT_PER_ITER = 4
 
     torch.manual_seed(0)
+    # torch.set_printoptions(precision=5)
 
     model = DeiTForImageClassification.from_pretrained(MODEL_NAME)
     # model = ViTForImageClassification.from_pretrained(MODEL_NAME)
@@ -187,28 +189,25 @@ def main():
 
             dist.barrier()
 
-            start_time = torch.tensor(time.perf_counter())
+            start_time = time.perf_counter()
             pipeline_output = run_pipeline(stage=stage, imgs=pipeline_input, rank=rank, world_size=world_size)
-            end_time = torch.tensor(time.perf_counter())
+            end_time = time.perf_counter()
 
-            # if rank == 0 or rank == world_size-1:
-            #     print(f"Rank {rank} Start Time: {start_time.item()}")
-            #     print(f"Rank {rank} End Time: {end_time.item()}")
+            elapsed_time = torch.tensor(end_time - start_time)
+            print(f"Rank {rank} Elapsed Time: {elapsed_time.item()}")
 
             dist.barrier()
 
-            dist.reduce(start_time, dst=world_size-1, op=torch.distributed.ReduceOp.MIN)
-            dist.reduce(end_time, dst=world_size-1, op=torch.distributed.ReduceOp.MAX)
+            dist.reduce(elapsed_time, dst=world_size-1, op=torch.distributed.ReduceOp.MAX)
 
-            # if rank == world_size-1:
-            #     print(f"Reduced Start Time: {start_time.item()}")
-            #     print(f"Reduced End Time: {end_time.item()}")
+            if rank == world_size-1:
+                print(f"Reduced Elapsed Time: {elapsed_time.item()}")
 
             if i <= WARMUP:
                 continue
 
             if rank == world_size - 1:
-                fps = NUM_IMGS / (end_time-start_time)
+                fps = NUM_IMGS / elapsed_time.item()
                 fps_list.append(fps)
 
 
