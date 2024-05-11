@@ -20,17 +20,32 @@ import logging
 # parallel-scp -r -A -h ~/hosts.txt ~/Pipeline-ViT/ ~/
 # torchrun   --nnodes=2   --nproc-per-node=1   --node-rank=0   --master-addr=192.168.1.102   --master-port=50000   pipeline_deit.py
 
-def run_serial(model, input_data, num_iter=100):
+# def run_serial(model, input_data, num_iter=100):
 
-    # for i in tqdm(range(num_iter)):
-    for i in range(num_iter):
-        output = model(input_data)
+#     # for i in tqdm(range(num_iter)):
+#     for i in range(num_iter):
+#         output = model(input_data)
 
-def run_pipeline(driver, input_data, num_iter=10):
+def run_pipeline(stage, rank, num_iter=1):
 
-    # for i in tqdm(range(num_iter)):
-    for i in range(num_iter):
-        output = driver(input_data)
+    for i in tqdm(range(num_iter)):
+        if rank == 0:
+            print(time.perf_counter())
+            stage(pipeline_input)
+        elif rank == world_size - 1:
+            print(time.perf_counter())
+            pipeline_output = stage()
+            # with torch.no_grad():
+            #     # model_compiled = torch.compile(model)
+            #     # model_compiled.eval()
+            #     model.eval()
+            #     serial_output = model(pipeline_input)
+            #     serial_output = torch.tensor(serial_output.logits)
+            #     are_outputs_same = torch.testing.assert_close(pipeline_output, serial_output)
+            print(time.perf_counter())
+            print("success")
+        else:
+            stage()
 
 
 if __name__ == "__main__":
@@ -108,19 +123,6 @@ if __name__ == "__main__":
     params = sum(p.numel() for p in stage.submod.parameters() if p.requires_grad)
     print(f"submod_{os.environ['RANK']} {params // 10 ** 6}M params", end='\n\n')
 
+    run_pipeline(stage, rank, 1)
 
-    if rank == 0:
-        stage(pipeline_input)
-    elif rank == world_size - 1:
-        pipeline_output = stage()
-        # with torch.no_grad():
-        #     # model_compiled = torch.compile(model)
-        #     # model_compiled.eval()
-        #     model.eval()
-        #     serial_output = model(pipeline_input)
-        #     serial_output = torch.tensor(serial_output.logits)
-        #     are_outputs_same = torch.testing.assert_close(pipeline_output, serial_output)
-        print("success")
-    else:
-        stage()
     print('done')

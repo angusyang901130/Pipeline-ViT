@@ -1,14 +1,23 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates
 # test
 import torch
+from torch import nn
 from typing import Any
 import time
 import numpy as np
 from tqdm.auto import tqdm
 from collections import defaultdict
-from transformers import DeiTImageProcessor, DeiTForImageClassification, ViTForImageClassification
+from transformers import DeiTImageProcessor, DeiTForImageClassification, ViTForImageClassification, DeiTModel
+import timm
 import pippy
 from pippy.IR import annotate_split_points, Pipe, PipeSplitWrapper
+
+import util
+import quant
+
+
+import os
+import copy
 
 from PIL import Image
 import requests
@@ -22,23 +31,25 @@ import argparse
 # parallel-scp -r -A -h ~/hosts.txt ~/Pipeline-ViT/ ~/
 # torchrun   --nnodes=2   --nproc-per-node=1   --node-rank=0   --master-addr=192.168.1.102   --master-port=50000   pipeline_deit.py
 
-def run_serial(model, imgs):
+def set_split_point(model):
 
-    result = None
+    # param_size = 0
+    # buffer_size = 0
 
-    # for i in tqdm(range(num_iter)):
-    for img in imgs:
-        
-        if result == None:
-            output = model(img)
-            result = output.logits
-        else:
-            output = model(img)
-            result = torch.cat((result, output.logits), dim=0)
+    # for param in model.state_dict().values():
+    #     param_size += param.numel()
 
-    return result
+    # for buffer in model.buffers():
+    #     buffer_size += buffer.numel()
 
-def run_pipeline(stage, imgs, rank, world_size):
+    # print(f'param_size: {param_size}, buffer_size: {buffer_size}')
+    # total_size = param_size + buffer_size
+    # print(f'total_size: {total_size}')
+
+    model.print_readable()
+
+
+def run_pipeline(stage, rank, world_size, imgs=None):
 
     if rank == 0:
         stage(imgs)
@@ -63,7 +74,7 @@ def main():
 
     # MODEL_NAME = "facebook/deit-small-distilled-patch16-224"
     # MODEL_NAME = "facebook/deit-small-patch16-224"
-    MODEL_NAME = "facebook/deit-tiny-distilled-patch16-224"
+    # MODEL_NAME = "facebook/deit-tiny-distilled-patch16-224"
     # MODEL_NAME = "facebook/deit-tiny-patch16-224"
 
     DEVICE = "cpu"
@@ -86,13 +97,14 @@ def main():
 
     torch.manual_seed(0)
     # torch.set_printoptions(precision=5)
-
-    model = DeiTForImageClassification.from_pretrained(MODEL_NAME)
+    # model = DeiTForImageClassification.from_pretrained(MODEL_NAME)
+    # model = DeiTModel.from_pretrained(MODEL_NAME)
     # model = ViTForImageClassification.from_pretrained(MODEL_NAME)
-    print(model)
 
     # model = torch.compile(model)
-    model.eval()
+    # model_ptq.eval()
+
+    # print(model_ptq.embeddings.patch_embeddings.projection.weight.dtype)
         
     import os
     rank = int(os.environ["RANK"])
@@ -132,14 +144,15 @@ def main():
     # kwargs_chunk_spec: Any = {}
     # output_chunk_spec: Any = TensorChunkSpec(0)
 
-    # split_policy = pippy.split_into_equal_size(world_size)
-    if world_size == 2:
-        annotate_split_points(model, {'deit.encoder.layer.5': PipeSplitWrapper.SplitPoint.END})
-    elif world_size == 4:
-        annotate_split_points(model, {'deit.encoder.layer.2': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.5': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.8': PipeSplitWrapper.SplitPoint.END})
-    elif world_size == 6:
-        annotate_split_points(model, {'deit.encoder.layer.1': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.3': PipeSplitWrapper.SplitPoint.END, 
-            'deit.encoder.layer.5': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.7': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.9': PipeSplitWrapper.SplitPoint.END})
+    split_policy = pippy.split_into_equal_size(world_size)
+    # if world_size == 2:
+    #     annotate_split_points(model_ptq, {'blocks.5': PipeSplitWrapper.SplitPoint.END})
+    # elif world_size == 4:
+    #     annotate_split_points(model_ptq, {'blocks.2': PipeSplitWrapper.SplitPoint.END, 'blocks.5': PipeSplitWrapper.SplitPoint.END, 
+    #         'blocks.8': PipeSplitWrapper.SplitPoint.END})
+    # elif world_size == 6:
+    #     annotate_split_points(model_ptq, {'blocks.1': PipeSplitWrapper.SplitPoint.END, 'blocks.3': PipeSplitWrapper.SplitPoint.END, 
+    #         'blocks.5': PipeSplitWrapper.SplitPoint.END, 'blocks.7': PipeSplitWrapper.SplitPoint.END, 'blocks.9': PipeSplitWrapper.SplitPoint.END})
 
 
     # url = 'http://images.cocodataset.org/val2017/000000039769.jpg'
@@ -153,25 +166,41 @@ def main():
     pipeline_input = torch.randn(NUM_IMGS, 3, 224, 224)
     # imgs = torch.randn(NUM_IMGS, 3, 224, 224)
 
-    pipe = Pipe.from_tracing(model, NUM_CHUNKS, example_args=(pipeline_input, ))
+    train_loader, test_loader, nb_classes = prepare_data(SERIAL_BATCH_SIZE)
+
+    model = torch.load("./0.9099_deit3_small_patch16_224.pth")
+    # print(model)
+    model_ptq = quantize_ptq_export(model, train_loader, use_reference_representation=False)
+    torch.ao.quantization.move_exported_model_to_eval(model_ptq)
+
+    # set_split_point(model_ptq)
+    # print(model_ptq)
+
+    dist.barrier()
+
+    pipe = Pipe.from_tracing(model_ptq, NUM_CHUNKS, example_args=(pipeline_input, ), split_policy=split_policy)
     # print(pipe)
 
     nstages = len(list(pipe.split_gm.children()))
     if rank == 0:
 
         print(" Original module params ".center(80, "*"))
-        params = sum(p.numel() for p in model.parameters() if p.requires_grad)   
-        print(f"Original module params: {params // 10 ** 6}M params")
+        params = sum(p.numel() for p in model_ptq.state_dict().values())   
+        print(f"Original module params: {params / (10 ** 6)}M params")
 
         for i, sm in enumerate(pipe.split_gm.children()):
-            params = sum(p.numel() for p in sm.parameters() if p.requires_grad)
-            print(f"Pipeline Stage {i} params: {params // 10 ** 6}M params")
+            params = sum(p.numel() for p in sm.state_dict().values())
+            print(f"Pipeline Stage {i} params: {params / (10 ** 6)}M params")
 
 
     from pippy.PipelineStage import PipelineStage
     stage = PipelineStage(pipe, rank, DEVICE)
 
-
+    for i, sm in enumerate(pipe.split_gm.children()):
+        if rank == i:
+            sm.print_readable()
+        
+    dist.barrier()
 
     '''
     Running Pipeline
