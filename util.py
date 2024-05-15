@@ -10,6 +10,20 @@ def build_dataset_CIFAR100(is_train, data_path):
     nb_classes = 100
     return dataset, nb_classes
 
+
+def build_dataset_CIFAR10(is_train, data_path):
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+   
+    dataset = datasets.CIFAR10(data_path, train=is_train, transform=transform, download=True)
+    nb_classes = 10
+
+    return dataset, nb_classes
+
+
 def build_transform(is_train):
     input_size = 224
     eval_crop_ratio = 1.0
@@ -46,12 +60,23 @@ def build_transform(is_train):
     t.append(transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD))
     return transforms.Compose(t)
 
-def prepare_data(batch_size):
-    train_set, nb_classes = build_dataset_CIFAR100(is_train=True, data_path='./data')
-    test_set, _ = build_dataset_CIFAR100(is_train=False, data_path='./data')
+def prepare_data(batch_size, data='cifar-100'):
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, drop_last=True)
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, drop_last=True)
+    if data == 'cifar-100':
+        train_set, nb_classes = build_dataset_CIFAR100(is_train=True, data_path='./data/cifar100')
+        test_set, _ = build_dataset_CIFAR100(is_train=False, data_path='./data/cifar100')
+        train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, drop_last=True)
+        test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, drop_last=True)
+
+    elif data == 'cifar-10':
+        train_set, nb_classes = build_dataset_CIFAR10(is_train=True, data_path='./data/cifar10')
+        test_set, _ = build_dataset_CIFAR10(is_train=False, data_path='./data/cifar10')
+        train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, drop_last=True)
+        test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, drop_last=True)
+
+    else:
+        raise NotImplementedError
+
     return train_loader, test_loader, nb_classes
 
 def evaluate_model(model, data_loader, device):

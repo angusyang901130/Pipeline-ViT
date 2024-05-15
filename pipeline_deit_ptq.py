@@ -12,8 +12,8 @@ import timm
 import pippy
 from pippy.IR import annotate_split_points, Pipe, PipeSplitWrapper
 
-import util
-import quant
+from util import *
+from quant_util import *
 
 
 import os
@@ -31,22 +31,24 @@ import argparse
 # parallel-scp -r -A -h ~/hosts.txt ~/Pipeline-ViT/ ~/
 # torchrun   --nnodes=2   --nproc-per-node=1   --node-rank=0   --master-addr=192.168.1.102   --master-port=50000   pipeline_deit.py
 
-def set_split_point(model):
+def set_split_point(model, nproc):
 
-    # param_size = 0
-    # buffer_size = 0
+    if nproc == 2:
+        annotate_split_points(model, {'blocks.5': PipeSplitWrapper.SplitPoint.END})
+    elif nproc == 4:
+        annotate_split_points(model, {'blocks.2': PipeSplitWrapper.SplitPoint.END, 
+                                      'blocks.5': PipeSplitWrapper.SplitPoint.END, 
+                                      'blocks.8': PipeSplitWrapper.SplitPoint.END})
+    elif nproc == 6:
+        annotate_split_points(model, {'blocks.1': PipeSplitWrapper.SplitPoint.END, 
+                                      'blocks.3': PipeSplitWrapper.SplitPoint.END, 
+                                      'blocks.5': PipeSplitWrapper.SplitPoint.END, 
+                                      'blocks.7': PipeSplitWrapper.SplitPoint.END, 
+                                      'blocks.9': PipeSplitWrapper.SplitPoint.END})
 
-    # for param in model.state_dict().values():
-    #     param_size += param.numel()
+    # model.print_readable()
 
-    # for buffer in model.buffers():
-    #     buffer_size += buffer.numel()
-
-    # print(f'param_size: {param_size}, buffer_size: {buffer_size}')
-    # total_size = param_size + buffer_size
-    # print(f'total_size: {total_size}')
-
-    model.print_readable()
+    return model
 
 
 def run_pipeline(stage, rank, world_size, imgs=None):
@@ -83,7 +85,7 @@ def main():
     print(f'intra op threads num: {torch.get_num_threads()} | inter op threads num: {torch.get_num_interop_threads()}')
 
     WARMUP = 0
-    NUM_TEST = 3
+    NUM_TEST = 1
     # NUM_IMGS = 200
 
     # MINI_BATCH_SIZE = 2
@@ -96,15 +98,6 @@ def main():
     # INPUT_PER_ITER = 4
 
     torch.manual_seed(0)
-    # torch.set_printoptions(precision=5)
-    # model = DeiTForImageClassification.from_pretrained(MODEL_NAME)
-    # model = DeiTModel.from_pretrained(MODEL_NAME)
-    # model = ViTForImageClassification.from_pretrained(MODEL_NAME)
-
-    # model = torch.compile(model)
-    # model_ptq.eval()
-
-    # print(model_ptq.embeddings.patch_embeddings.projection.weight.dtype)
         
     import os
     rank = int(os.environ["RANK"])
@@ -144,23 +137,6 @@ def main():
     # kwargs_chunk_spec: Any = {}
     # output_chunk_spec: Any = TensorChunkSpec(0)
 
-    split_policy = pippy.split_into_equal_size(world_size)
-    # if world_size == 2:
-    #     annotate_split_points(model_ptq, {'blocks.5': PipeSplitWrapper.SplitPoint.END})
-    # elif world_size == 4:
-    #     annotate_split_points(model_ptq, {'blocks.2': PipeSplitWrapper.SplitPoint.END, 'blocks.5': PipeSplitWrapper.SplitPoint.END, 
-    #         'blocks.8': PipeSplitWrapper.SplitPoint.END})
-    # elif world_size == 6:
-    #     annotate_split_points(model_ptq, {'blocks.1': PipeSplitWrapper.SplitPoint.END, 'blocks.3': PipeSplitWrapper.SplitPoint.END, 
-    #         'blocks.5': PipeSplitWrapper.SplitPoint.END, 'blocks.7': PipeSplitWrapper.SplitPoint.END, 'blocks.9': PipeSplitWrapper.SplitPoint.END})
-
-
-    # url = 'http://images.cocodataset.org/val2017/000000039769.jpg'
-    # image = Image.open(requests.get(url, stream=True).raw)
-    # feature_extractor = DeiTImageProcessor.from_pretrained(MODEL_NAME)
-    # input = feature_extractor(images=image, return_tensors="pt")
-    # image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
-    # inputs = image_processor(images=image, return_tensors="pt").pixel_values
 
     serial_input = torch.randn(NUM_CHUNKS, SERIAL_BATCH_SIZE, 3, 224, 224)
     pipeline_input = torch.randn(NUM_IMGS, 3, 224, 224)
@@ -169,16 +145,25 @@ def main():
     train_loader, test_loader, nb_classes = prepare_data(SERIAL_BATCH_SIZE)
 
     model = torch.load("./0.9099_deit3_small_patch16_224.pth")
-    # print(model)
-    model_ptq = quantize_ptq_export(model, train_loader, use_reference_representation=False)
-    torch.ao.quantization.move_exported_model_to_eval(model_ptq)
+    # model_ptq = quantize_ptq_export(model, train_loader, use_reference_representation=False)
+    # model_ptq = quantize_ptq_fx(model, train_loader)
+    # model_ptq = quantize_ptq(model)
+    # print(model_ptq)
+    model = set_split_point(model, world_size)
 
-    # set_split_point(model_ptq)
+    # print(model)
+    # model_ptq = quantize_ptq_export(model, train_loader, use_reference_representation=False)
+    
+    # torch.ao.quantization.move_exported_model_to_eval(model_ptq)
     # print(model_ptq)
 
     dist.barrier()
 
-    pipe = Pipe.from_tracing(model_ptq, NUM_CHUNKS, example_args=(pipeline_input, ), split_policy=split_policy)
+    # With NO split policy
+    # pipe = Pipe.from_tracing(model_ptq, NUM_CHUNKS, example_args=(pipeline_input, ))
+    # With split policy
+    split_policy = pippy.split_into_equal_size(world_size)
+    pipe = Pipe.from_tracing(model, NUM_CHUNKS, example_args=(pipeline_input, ), split_policy=split_policy)
     # print(pipe)
 
     nstages = len(list(pipe.split_gm.children()))
@@ -196,9 +181,9 @@ def main():
     from pippy.PipelineStage import PipelineStage
     stage = PipelineStage(pipe, rank, DEVICE)
 
-    for i, sm in enumerate(pipe.split_gm.children()):
-        if rank == i:
-            sm.print_readable()
+    # for i, sm in enumerate(pipe.split_gm.children()):
+    #     if rank == i:
+    #         sm.print_readable()
         
     dist.barrier()
 
@@ -211,7 +196,8 @@ def main():
     print("Running Pipeline...")
     with torch.no_grad():
 
-        for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
+        # for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
+        for i in range(1, NUM_TEST+WARMUP+1):
             
             '''
             To be fair, all threads has to be on same point
@@ -247,6 +233,7 @@ def main():
         # torch.testing.assert_close(pipeline_output, reference_output)
 
         # print(" Pipeline parallel model ran successfully! ".center(80, "*"))
+
 
     # '''
     # Running Serial

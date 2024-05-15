@@ -1,14 +1,23 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates
 # test
 import torch
+from torch import nn
 from typing import Any
 import time
 import numpy as np
 from tqdm.auto import tqdm
 from collections import defaultdict
-from transformers import DeiTImageProcessor, DeiTForImageClassification, ViTForImageClassification
+from transformers import DeiTImageProcessor, DeiTForImageClassification, ViTForImageClassification, DeiTModel
+import timm
 import pippy
 from pippy.IR import annotate_split_points, Pipe, PipeSplitWrapper
+
+from util import *
+from quant_util import *
+
+
+import os
+import copy
 
 from PIL import Image
 import requests
@@ -22,23 +31,42 @@ import argparse
 # parallel-scp -r -A -h ~/hosts.txt ~/Pipeline-ViT/ ~/
 # torchrun   --nnodes=2   --nproc-per-node=1   --node-rank=0   --master-addr=192.168.1.102   --master-port=50000   pipeline_deit.py
 
+def set_split_point(model, nproc):
+
+    if nproc == 2:
+        annotate_split_points(model, {'blocks.5': PipeSplitWrapper.SplitPoint.END})
+    elif nproc == 4:
+        annotate_split_points(model, {'blocks.2': PipeSplitWrapper.SplitPoint.END, 
+                                      'blocks.5': PipeSplitWrapper.SplitPoint.END, 
+                                      'blocks.8': PipeSplitWrapper.SplitPoint.END})
+    elif nproc == 6:
+        annotate_split_points(model, {'blocks.1': PipeSplitWrapper.SplitPoint.END, 
+                                      'blocks.3': PipeSplitWrapper.SplitPoint.END, 
+                                      'blocks.5': PipeSplitWrapper.SplitPoint.END, 
+                                      'blocks.7': PipeSplitWrapper.SplitPoint.END, 
+                                      'blocks.9': PipeSplitWrapper.SplitPoint.END})
+
+    # model.print_readable()
+
+    return model
+
+
 def run_serial(model, imgs):
 
     result = None
 
     # for i in tqdm(range(num_iter)):
-    for img in imgs:
+    for img in tqdm(imgs):
         
         if result == None:
             output = model(img)
-            result = output.logits
+            result = output
         else:
             output = model(img)
-            result = torch.cat((result, output.logits), dim=0)
+            result = torch.cat((result, output), dim=0)
 
-    return result
 
-def run_pipeline(stage, imgs, rank, world_size):
+def run_pipeline(stage, rank, world_size, imgs=None):
 
     if rank == 0:
         stage(imgs)
@@ -63,7 +91,7 @@ def main():
 
     # MODEL_NAME = "facebook/deit-small-distilled-patch16-224"
     # MODEL_NAME = "facebook/deit-small-patch16-224"
-    MODEL_NAME = "facebook/deit-tiny-distilled-patch16-224"
+    # MODEL_NAME = "facebook/deit-tiny-distilled-patch16-224"
     # MODEL_NAME = "facebook/deit-tiny-patch16-224"
 
     DEVICE = "cpu"
@@ -72,7 +100,7 @@ def main():
     print(f'intra op threads num: {torch.get_num_threads()} | inter op threads num: {torch.get_num_interop_threads()}')
 
     WARMUP = 0
-    NUM_TEST = 3
+    NUM_TEST = 1
     # NUM_IMGS = 200
 
     # MINI_BATCH_SIZE = 2
@@ -85,14 +113,6 @@ def main():
     # INPUT_PER_ITER = 4
 
     torch.manual_seed(0)
-    # torch.set_printoptions(precision=5)
-
-    model = DeiTForImageClassification.from_pretrained(MODEL_NAME)
-    # model = ViTForImageClassification.from_pretrained(MODEL_NAME)
-    print(model)
-
-    # model = torch.compile(model)
-    model.eval()
         
     import os
     rank = int(os.environ["RANK"])
@@ -132,46 +152,49 @@ def main():
     # kwargs_chunk_spec: Any = {}
     # output_chunk_spec: Any = TensorChunkSpec(0)
 
-    # split_policy = pippy.split_into_equal_size(world_size)
-    if world_size == 2:
-        annotate_split_points(model, {'deit.encoder.layer.5': PipeSplitWrapper.SplitPoint.END})
-    elif world_size == 4:
-        annotate_split_points(model, {'deit.encoder.layer.2': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.5': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.8': PipeSplitWrapper.SplitPoint.END})
-    elif world_size == 6:
-        annotate_split_points(model, {'deit.encoder.layer.1': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.3': PipeSplitWrapper.SplitPoint.END, 
-            'deit.encoder.layer.5': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.7': PipeSplitWrapper.SplitPoint.END, 'deit.encoder.layer.9': PipeSplitWrapper.SplitPoint.END})
-
-
-    # url = 'http://images.cocodataset.org/val2017/000000039769.jpg'
-    # image = Image.open(requests.get(url, stream=True).raw)
-    # feature_extractor = DeiTImageProcessor.from_pretrained(MODEL_NAME)
-    # input = feature_extractor(images=image, return_tensors="pt")
-    # image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
-    # inputs = image_processor(images=image, return_tensors="pt").pixel_values
 
     serial_input = torch.randn(NUM_CHUNKS, SERIAL_BATCH_SIZE, 3, 224, 224)
     pipeline_input = torch.randn(NUM_IMGS, 3, 224, 224)
     # imgs = torch.randn(NUM_IMGS, 3, 224, 224)
 
+    train_loader, test_loader, nb_classes = prepare_data(SERIAL_BATCH_SIZE, data='cifar-100')
+    # train_loader, test_loader, nb_classes = prepare_data(SERIAL_BATCH_SIZE, data='cifar-10')
+
+    model = torch.load("./0.9099_deit3_small_patch16_224.pth", map_location='cpu')
+    # model = torch.load("./mobilenet_0.9.pth", map_location='cpu')
+
+    model = set_split_point(model, world_size)
+
+
+    dist.barrier()
+
+    # With NO split policy
     pipe = Pipe.from_tracing(model, NUM_CHUNKS, example_args=(pipeline_input, ))
+    # With split policy
+    # split_policy = pippy.split_into_equal_size(world_size)
+    # pipe = Pipe.from_tracing(model, NUM_CHUNKS, example_args=(pipeline_input, ), split_policy=split_policy)
     # print(pipe)
 
     nstages = len(list(pipe.split_gm.children()))
     if rank == 0:
 
         print(" Original module params ".center(80, "*"))
-        params = sum(p.numel() for p in model.parameters() if p.requires_grad)   
-        print(f"Original module params: {params // 10 ** 6}M params")
+        params = sum(p.numel() for p in model.state_dict().values())   
+        print(f"Original module params: {params / (10 ** 6)}M params")
 
         for i, sm in enumerate(pipe.split_gm.children()):
-            params = sum(p.numel() for p in sm.parameters() if p.requires_grad)
-            print(f"Pipeline Stage {i} params: {params // 10 ** 6}M params")
+            params = sum(p.numel() for p in sm.state_dict().values())
+            print(f"Pipeline Stage {i} params: {params / (10 ** 6)}M params")
 
 
     from pippy.PipelineStage import PipelineStage
     stage = PipelineStage(pipe, rank, DEVICE)
 
-
+    # for i, sm in enumerate(pipe.split_gm.children()):
+    #     if rank == i:
+    #         sm.print_readable()
+        
+    dist.barrier()
 
     '''
     Running Pipeline
@@ -182,7 +205,8 @@ def main():
     print("Running Pipeline...")
     with torch.no_grad():
 
-        for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
+        # for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
+        for i in range(1, NUM_TEST+WARMUP+1):
             
             '''
             To be fair, all threads has to be on same point
@@ -219,35 +243,44 @@ def main():
 
         # print(" Pipeline parallel model ran successfully! ".center(80, "*"))
 
+
     # '''
     # Running Serial
     # '''
 
-    # fps_list = []
+    fps_list = []
 
-    # if rank == world_size-1:
+    print("Running Serial...")
 
-    #     print("Running Serial...")
-    #     with torch.no_grad():
-    #         for i in tqdm(range(1, NUM_TEST+WARMUP+1)):
-                
-    #             # tmp_imgs = torch.unsqueeze(imgs, dim=1)
+    with torch.no_grad():
+        for i in range(1, NUM_TEST+WARMUP+1):
+            
+            # tmp_imgs = torch.unsqueeze(imgs, dim=1)
 
-    #             start_time = time.perf_counter()
-    #             reference_output = run_serial(model=model, imgs=serial_input)
-    #             end_time = time.perf_counter()
-                
-    #             if i <= WARMUP:
-    #                 continue
+            start_time = time.perf_counter()
+            reference_output = run_serial(model=model, imgs=serial_input)
+            end_time = time.perf_counter()
 
-    #             fps = NUM_IMGS / (end_time-start_time)
-    #             fps_list.append(fps)
+            elapsed_time = torch.tensor(end_time - start_time)
 
+            print(f"Rank {rank} Elapsed Time: {elapsed_time.item()}")
 
-    #     print('Throughput without pipeline (input batch size = %d): %.4f fps'%(SERIAL_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
-    #     time.sleep(10)
-    #     serial_fps = np.mean(fps_list)
-    #     print(f'speed up: {pipeline_fps/serial_fps}')
+            dist.barrier()
+
+            dist.reduce(elapsed_time, dst=world_size-1, op=torch.distributed.ReduceOp.MAX)
+            
+            if i <= WARMUP:
+                continue
+
+            if rank == world_size - 1:
+                fps = NUM_IMGS / elapsed_time.item()
+                fps_list.append(fps)
+
+        if rank == world_size - 1:
+            print('Throughput without pipeline (mini batch size = %d): %.4f fps'%(MINI_BATCH_SIZE, np.mean(fps_list)), end='\n\n')
+            serial_fps = np.mean(fps_list)
+
+            print(f'speed up: {pipeline_fps/serial_fps}')
 
     dist.destroy_process_group()
     # rpc.shutdown()

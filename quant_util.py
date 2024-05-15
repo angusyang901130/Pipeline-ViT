@@ -9,6 +9,13 @@ from torch.ao.quantization.quantizer.xnnpack_quantizer import (
     get_symmetric_quantization_config,
     XNNPACKQuantizer,
 )
+
+from torch.ao.quantization import (
+    get_default_qconfig_mapping,
+    get_default_qat_qconfig_mapping,
+    QConfigMapping,
+)
+
 import torch.ao.quantization.quantize_fx as quantize_fx
 
 
@@ -63,13 +70,12 @@ def quantize_ptq_fx(model: nn.Module, data_loader):
     return model_quantized
 
 
-def quantized_ptq(model: nn.Module, data_loader):
+def quantize_ptq(model: nn.Module, data_loader):
     
     model.eval()
 
     model.qconfig = torch.ao.quantization.get_default_qconfig('qnnpack')
-    model_fused = torch.ao.quantization.fuse_modules(model, [['conv', 'bn', 'relu']])
-    model_prepared = torch.ao.quantization.prepare(model_fused)
+    model_prepared = torch.ao.quantization.prepare(model)
 
     for i, (images, _) in enumerate(data_loader):
         if i >= 1:
